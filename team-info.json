@@ -1,0 +1,34 @@
+{
+    "team_name": "The Final Group",
+    "students": [
+        {
+            "student_id": "k1429762",
+            "first_name": "Luca",
+            "last_name": "Dal Bosco",
+            "email": "luca.dalbosco@mail.polimi.it",
+            "github_user": "lucamcwood"
+        },
+	{
+            "student_id": "k00000000",
+            "first_name": "First",
+            "last_name": "Last",
+            "email": "first.last@mail.com",
+            "github_user": "mygitusername"
+        },
+	{
+            "student_id": "k00000000",
+            "first_name": "First",
+            "last_name": "Last",
+            "email": "first.last@mail.com",
+            "github_user": "mygitusername"
+        },
+	{
+            "student_id": "k00000000",
+            "first_name": "First",
+            "last_name": "Last",
+            "email": "first.last@mail.com",
+            "github_user": "mygitusername"
+        },
+
+    ]
+}

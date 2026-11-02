@@ -1,0 +1,25 @@
+{
+    "team_name": "The Final Group",
+    "students": [
+        {
+            "first_name": "Luca",
+            "last_name": "Dal Bosco",
+            "workload": 0.25
+        },
+	{
+            "first_name": "xxx",
+            "last_name": "yyy",
+            "workload": 0.25
+        },
+	{
+            "first_name": "xxx",
+            "last_name": "yyy",
+            "workload": 0.25
+        },
+	{
+            "first_name": "xxx",
+            "last_name": "yyy",
+            "workload": 0.25
+        },
+    ]
+} 
