@@ -1,0 +1,15 @@
+# Python dependencies for the notebooks in this repository.
+# Install with: pip install -r requirements.txt
+#
+# Note: on Google Colab, torch and pandas are preinstalled; the notebook
+# only installs transformers, accelerate and datasets. `google.colab`
+# (used to mount Google Drive) is only available inside Colab.
+
+torch>=2.1
+transformers>=4.56
+accelerate>=0.33
+datasets>=2.20
+pandas>=2.0
+
+# To run the notebooks locally
+jupyter
