@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local copies of experiment results (kept on Google Drive)
+data/
+.DS_Store

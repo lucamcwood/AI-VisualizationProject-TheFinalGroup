@@ -12,12 +12,15 @@ Tool: Claude Code (Claude Opus 5.5). Entries marked _TODO_ are for the team to f
 | 3 | 2026-11-05 | Uploaded run 1 outputs: "anything wrong / weird?" | Found: Qwen-Math did not stop and invented new questions (wrong answers taken from them); R1 cut off at 2048 tokens in 10/50. Raised R1 budget to 4096, stop Qwen after its first `\boxed{}`, clearer table | **Accepted**. R1: 38 → 43/50 |
 | 4 | 2026-11-05 | Uploaded run 2 outputs: "and now?" | Found Qwen-Math writing junk tokens and looping: it is a base model and never learned the chat template. Switched it to a plain-text prompt | **Accepted**. Qwen-Math: 21 → 40/50 |
 | 5 | 2026-11-05 | Uploaded run 3 outputs | No setup bugs left. Pointed out Qwen "imagines" Python code output, causing several wrong answers | **Accepted** as a finding to analyse later |
+| 6 | 2026-11-09 | "Create a notebook for the AI visualizations" (with the run_4 result files) | Read the raw results first and found that the failures are nested (Qwen never solves a problem R1 misses) and that both models give the same wrong answer in 3 problems. Built notebook 03 with an outcome grid of all 50 problems and a zoom on the 10 failed ones (answers + question). Ran it locally and fixed the layout bugs it saw in the rendered plots (overlapping labels, `$` in questions read as math) | **Accepted** |
 | … | _TODO_ | | | |
 
 ## 2. How AI suggestions affected analytical decisions
 
 - Each model is prompted the way it works best (R1: chat template + sampling; Qwen-Math base: plain text + greedy + stop after first answer). This is a methodological choice we must state in the report.
 - R1 token budget 4096 instead of 2048: fewer cut-off answers, but runs ~2× slower.
+- Notebook 03 looks at single problems instead of averages (Notebook 02 already covers those), starting with "do both models fail on the same problems?".
+- Colour for the outcomes is backed by a symbol (✓ ✗ …) so the plots work without colour (colour-blind readers, print).
 - _TODO: decisions made in later notebooks._
 
 ## 3. Failure patterns of AI assistance
