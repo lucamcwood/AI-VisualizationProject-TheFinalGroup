@@ -24,9 +24,9 @@ Tool: Claude Code (Claude Opus 5.5; from entry 9 on Claude Fable 5.2). Entries m
 - R1 token budget 4096 instead of 2048: fewer cut-off answers, but runs ~2× slower.
 - Notebook 03 looks at single problems instead of averages (Notebook 02 already covers those), starting with "do both models fail on the same problems?".
 - Colour for the outcomes is backed by a symbol (✓ ✗ …) so the plots work without colour (colour-blind readers, print).
-- **Failure types** (notebook 03, section 2) were proposed by the AI after reading every failed output. They are a judgement, so the team must check each label against the output.
+- **Failure types** (notebook 03, section 2) were proposed by the AI after reading every failed output. They are a judgement, so the team must check each label against the output. **Checked by Adrian Lehrner on 2026-11-10: all 17 labels kept.**
 - **Early answering** (cut the thinking at x % and force an answer) follows Lanham et al. (2023). It was suggested by the AI in the first brief (entry 1) and only used now.
-- **Reworded questions** (Experiment B) were written by the AI. A rewording can also make a question *easier* (not only clearer), which would bias the result; the team should check that each one keeps the difficulty.
+- **Reworded questions** (Experiment B) were written by the AI. A rewording can also make a question *easier* (not only clearer), which would bias the result; the team should check that each one keeps the difficulty. **Checked by Adrian Lehrner on 2026-11-10: all 5 rewordings kept.**
 - The experiments of notebook 03 ran on an Apple M3 GPU, not on the Colab T4. R1 samples, so its exact outputs differ between machines; the conclusions should not depend on single outputs.
 - **Hesitation is no longer used as a sign of failure** (notebook 03, section 4.3). The hesitation rate rises with the length of the thinking (rank correlation 0.60), and the 7 failures are all long, so the first plot could not separate the two. Suggested by the AI when it reviewed its own work (entry 9).
 - **"R1 is better than Qwen" is not claimed as a number.** The AI pointed out that 43 vs 40 correct rests on 3 problems (exact sign test p = 0.25). The notebook now describes *how* the models differ.
