@@ -15,8 +15,8 @@ Goal: Design a visualization that helps you observe patterns in what goes in and
 
 | Sub-group | Names | Used AI |
 |-----------|-------|---------|
-| 01 | Dal Bosco, xxxxx | NO |
-| 02 | Lehrner, zzz | YES |
+| 01 | Dal Bosco, Bhattarai | NO |
+| 02 | Lehrner, Kühberger | YES |
 
 ## AI usage
 
