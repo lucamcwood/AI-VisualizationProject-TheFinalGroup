@@ -36,10 +36,12 @@ Because R1-Distill **is** Qwen2.5-Math plus reasoning training, every difference
 
 **Story line**
 1. **Who fails where?** The failures are nested: R1 solves everything Qwen solves, plus 3 more.
-2. **Why do they fail?** Every failure, labelled by type. Reasoning fixes *calculation* errors, not *understanding* errors.
+2. **Why do they fail?** Every failure, labelled by type. Reasoning fixes *calculation* errors, not *understanding*
+   errors. Repetition maps show how the cut-off answers get stuck.
 3. **Case studies:** the exact words where it goes wrong.
 4. **Inside R1's thinking:** when does the correct answer appear, and what happens afterwards?
-5. **Experiment A, early answering:** stop R1's thinking early and force an answer. How much thinking is needed?
+5. **Experiment A, early answering:** stop R1's thinking early and force an answer. How much thinking is needed, how
+   sure is R1 along the way, and in which layer of the model does the answer appear?
 6. **Experiment B, rewording:** are the shared mistakes caused by the wording of the questions?
 7. **Summary**
 
@@ -133,6 +135,13 @@ The table counts the problems by the outcome of **both** models at once (rows: R
 """)
 
 code(r"""
+# How sure is "R1 is better"? Only the problems that exactly one model solves carry information (exact sign test).
+only_r1 = int(((outcomes[R1] == "correct") & (outcomes[QWEN] != "correct")).sum())
+only_qwen = int(((outcomes[QWEN] == "correct") & (outcomes[R1] != "correct")).sum())
+n_diff = only_r1 + only_qwen
+p_sign = min(1.0, 2 * sum(math.comb(n_diff, k) for k in range(min(only_r1, only_qwen) + 1)) / 2 ** n_diff)
+print(f"Solved by R1 only: {only_r1}, by Qwen only: {only_qwen}  ->  exact sign test p = {p_sign:.2f}")
+
 pd.crosstab(outcomes[R1], outcomes[QWEN], margins=True, margins_name="total")
 """)
 
@@ -195,6 +204,10 @@ plt.show()
 md(r"""
 **Takeaway:** 40 problems are easy for both. R1 adds 3 problems on top, and loses none. The remaining 7 are hard for
 *both* models, so the hard problems are a property of the questions, not of one model.
+
+*How sure is this?* The nested pattern is clear, but "R1 is better" rests on 3 problems. With 3 against 0 the exact sign
+test gives p = 0.25, so on 50 problems the difference in accuracy is **not statistically secured**. This notebook therefore
+describes *how* the two models differ, not by how much.
 """)
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -304,11 +317,186 @@ print(outputs.loc[PROBLEM_ID, MODEL])
 md(r"""
 **Takeaways**
 * The **understanding** errors (top three rows) are shared: whenever R1 misreads a question, Qwen does too, mostly
-  with the same wrong answer. R1 inherited them from Qwen, and the reasoning training did not fix them.
+  with the same wrong answer. This fits the idea that R1 keeps these errors from its base model and that the reasoning
+  training did not fix them, but one run cannot prove where they come from.
 * The **carrying-out** errors differ. Qwen writes correct Python code but then *imagines* its output, and gets the
   arithmetic wrong (it never runs the code). R1 does the arithmetic step by step in text, and solves exactly these 3.
 * R1's own typical failure is **going in circles**: it doubts its reading of the question, re-decides, and runs out of
-  tokens. Qwen instead repeats the same text word for word.
+  tokens. Qwen instead repeats the same text word for word. Section 2.1 measures this difference.
+""")
+
+md(r"""
+### 2.1 Checking two labels with a measurement: repetition maps
+"Went in circles" and "repeated itself" are judgements. A **repetition map** measures them: the output is split into
+sentences, and both axes are the sentence number. A dot at (x, y) means *sentence x says the same as sentence y*
+(dark = word for word, light = at least 80% of the words are the same).
+
+How to read it: the diagonal is every sentence compared with itself. **Lines parallel to the diagonal are loops**: a whole
+passage is written again. An empty map means that the text never repeats.
+""")
+
+code(r"""
+def sentences(text):
+    # Sentences (or lines) of an output, as sets of lower-case words; very short pieces are dropped
+    parts = [s.strip().lower() for s in re.split(r"(?<=[.!?\n])\s+", text)]
+    return [(s, frozenset(re.findall(r"\w+", s))) for s in parts if len(s) > 15]
+
+
+def repetition_matrix(text):
+    # 0 = different, 1 = at least 80% of the words shared (Jaccard), 2 = identical sentence
+    sents = sentences(text)
+    n = len(sents)
+    sim = np.zeros((n, n), dtype=np.int8)
+    for i in range(n):
+        for j in range(i):
+            (a, wa), (b, wb) = sents[i], sents[j]
+            if a == b:
+                sim[i, j] = sim[j, i] = 2
+            elif len(wa & wb) >= 0.8 * len(wa | wb):
+                sim[i, j] = sim[j, i] = 1
+    return sim
+
+
+rep = []
+for pid in problems.index:
+    for model in [R1, QWEN]:
+        sim = repetition_matrix(outputs.loc[pid, model])
+        earlier = np.tril(sim, -1)          # compare each sentence only with the sentences before it
+        rep.append(dict(model=model, id=pid, outcome=outcomes.loc[pid, model], n_sentences=len(sim),
+                        exact=(earlier.max(axis=1) == 2).mean() if len(sim) else 0.0,
+                        repeated=(earlier.max(axis=1) >= 1).mean() if len(sim) else 0.0))
+rep = pd.DataFrame(rep).set_index(["model", "id"])
+
+MAPS = [(R1, tokens[R1][outcomes[R1] == "correct"].idxmax(), "correct, its longest output"),
+        (R1, 4, "cut off, went in circles"), (R1, 8, "cut off, went in circles"),
+        (R1, 21, "cut off, went in circles"), (QWEN, 21, "cut off, repeated itself"),
+        (QWEN, 37, "cut off, repeated itself")]
+fig, axes = plt.subplots(2, 3, figsize=(13, 9.2))
+for ax, (model, pid, label) in zip(axes.flat, MAPS):
+    sim = repetition_matrix(outputs.loc[pid, model])
+    n = len(sim)
+    size = float(np.clip((230 / n) ** 2, 3, 30))                         # dots stay visible in long outputs
+    for level, color in [(1, BLUE_LIGHT), (2, BLUE)]:
+        ys, xs = np.nonzero(sim == level)
+        ax.scatter(xs + 0.5, ys + 0.5, s=size, marker="s", color=color, lw=0)
+    ax.plot([0, n], [0, n], color=INK_MUTED, lw=0.8)                     # the diagonal
+    ax.set_xlim(0, n)
+    ax.set_ylim(n, 0)
+    ax.set_aspect("equal")
+    r = rep.loc[(model, pid)]
+    o = outcomes.loc[pid, model]
+    ax.set_title(f"{model} #{pid}: {label}\n{r.repeated:.0%} of {n} sentences repeat ({r.exact:.0%} word for word)",
+                 loc="left", fontsize=9.5, color=INK)
+    ax.set_xlabel("sentence number", fontsize=9)
+    if ax in axes[:, 0]:
+        ax.set_ylabel("sentence number", fontsize=9)
+    ax.tick_params(length=2, labelsize=8)
+fig.legend(handles=[Patch(color=BLUE, label="same sentence, word for word"),
+                    Patch(color=BLUE_LIGHT, label="nearly the same (at least 80% of the words)")],
+           loc="lower center", ncol=2, frameon=False)
+fig.suptitle("Repetition maps: Qwen loops word for word, R1 comes back to the same statements in scattered places",
+             x=0.01, ha="left", fontsize=12.5, color=INK)
+plt.tight_layout(rect=(0, 0.035, 1, 0.96), h_pad=2.5, w_pad=2)
+plt.show()
+""")
+
+md(r"""
+**What the patterns look like in the text.** Below are three excerpts from the outputs in the maps, numbered with the
+same sentence numbers as the map axes. `= #k` marks a sentence that is word for word the same as the earlier sentence k.
+* **Qwen #37 (checkerboard):** two sentences, A and B, alternate until the token limit.
+* **Qwen #21 (diagonal stripes):** a whole block (set up an equation, find a contradiction, "re-evaluate") is written
+  again and again; only the variable changes once, from x to y.
+* **R1 #4 (scattered dots):** R1 keeps coming back to the same doubt (3 cups per day or per meal?), but in new words
+  each time, so almost no sentence is an exact copy.
+""")
+
+code(r"""
+def numbered_sentences(text):
+    # Same split as repetition_matrix, but keeping the original wording (the numbers match the map axes)
+    parts = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text)]
+    return [s for s in parts if len(s) > 15]
+
+
+def show_excerpt(model, pid, numbers, title):
+    sents = numbered_sentences(outputs.loc[pid, model])
+    first_seen = {}
+    for k, s in enumerate(sents):
+        first_seen.setdefault(s.lower(), k)
+    print(f"── {model} #{pid}: {title}  ({len(sents)} sentences in total)")
+    last = None
+    for k in numbers:
+        if last is not None and k > last + 1:
+            print("      …")
+        earlier = first_seen[sents[k].lower()]
+        mark = f"= #{earlier}" if earlier < k else ""
+        print(f"{k:>4} {mark:>7}  {sents[k][:150]}")
+        last = k
+    print()
+
+
+show_excerpt(QWEN, 37, range(9, 18), "falls into a loop of two sentences")
+show_excerpt(QWEN, 21, list(range(11, 24)) + list(range(29, 40)), "writes the same block again and again")
+r1_doubt = [k for k, s in enumerate(numbered_sentences(outputs.loc[4, R1])) if "1 cup per chicken" in s][:8]
+show_excerpt(R1, 4, r1_doubt, "the same doubt about the 3 cups, in new words each time")
+""")
+
+md(r"""
+The same measure for **all 100 outputs**: the share of sentences that repeat an earlier sentence, one dot per output.
+""")
+
+code(r"""
+rng = np.random.default_rng(0)
+ROWS = [(m, o) for m in [R1, QWEN] for o in ["correct", "wrong", "cut off"]]
+fig, ax = plt.subplots(figsize=(13, 3.8))
+ylabels = []
+for k, (model, o) in enumerate(ROWS):
+    d = rep.loc[model][rep.loc[model].outcome == o]
+    ylabels.append(f"{model} · {SYMBOLS[o]} {o} ({len(d)})")
+    jitter = rng.uniform(-0.2, 0.2, len(d)) if o == "correct" else np.zeros(len(d))   # only the crowded rows
+    ax.scatter(d.repeated, k + jitter, s=44, color=COLORS[o], ec="white", lw=0.8, zorder=3)
+    if o != "correct":   # name the failures; two close neighbours get their labels to the left and to the right
+        named = d[d.repeated >= 0.1].sort_values("repeated")
+        xs = named.repeated.tolist()
+        for j, pid in enumerate(named.index):
+            if j + 1 < len(xs) and xs[j + 1] - xs[j] < 0.035:
+                offset, ha = (-7, -3), "right"
+            elif j > 0 and xs[j] - xs[j - 1] < 0.035:
+                offset, ha = (7, -3), "left"
+            else:
+                offset, ha = (0, 9), "center"
+            ax.annotate(f"#{pid}", (xs[j], k), textcoords="offset points", xytext=offset, ha=ha, fontsize=8.5,
+                        color=INK_MUTED)
+ax.axhline(2.5, color=GRID, lw=1)
+ax.set_yticks(range(len(ylabels)), ylabels, color=INK)
+ax.set_ylim(len(ylabels) - 0.5, -0.6)
+ax.set_xlim(-0.02, 1)
+ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+ax.set_xlabel("share of sentences that repeat an earlier sentence (word for word or nearly)")
+ax.grid(axis="x", color=GRID, lw=0.6)
+ax.set_axisbelow(True)
+ax.tick_params(axis="y", length=0)
+ax.spines["left"].set_visible(False)
+top = rep.reset_index().groupby(["model", "outcome"]).repeated.agg(["min", "max"])
+ax.set_title(f"Qwen's cut-off outputs are mostly repetition ({top.loc[(QWEN, 'cut off'), 'min']:.0%} and more); "
+             f"R1's cut-offs: {top.loc[(R1, 'cut off'), 'min']:.0%} to {top.loc[(R1, 'cut off'), 'max']:.0%}, "
+             f"its correct answers: at most {top.loc[(R1, 'correct'), 'max']:.0%}", loc="left", fontsize=11, color=INK)
+plt.tight_layout()
+plt.show()
+
+rep.reset_index().groupby(["model", "outcome"]).repeated.agg(["count", "min", "median", "max"]).round(2)
+""")
+
+md(r"""
+**Takeaways (2.1)**
+* The measurement supports both labels, and shows that they are two different things. Qwen's cut-off outputs are
+  **loops**: about three quarters of the sentences are exact copies, in long lines parallel to the diagonal. Once it is
+  in the loop, it never leaves.
+* R1's cut-off outputs repeat much less, and mostly not word for word. It comes back to the same statements **in
+  scattered places** (single dots and short lines), which is what "going in circles" looks like. Even its longest
+  *correct* output (#30) shows blocks: R1 re-computes the same lines when it checks its work.
+* **As a warning sign, repetition works for Qwen, but only weakly for R1.** A Qwen run that repeats most of its
+  sentences could be stopped early. For R1 the cut-off outputs repeat more than every correct one, but the gap is small
+  and two of its wrong answers (#7, #37) repeat about as much as the lowest cut-off.
 """)
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -620,40 +808,54 @@ plt.show()
 
 md(r"""
 ### 4.3 Hesitation: does doubting help?
-Hesitation words (`wait`, `hmm`, `let me check`, …) per 1,000 tokens, one dot per problem.
+Hesitation words (`wait`, `hmm`, `let me check`, …) per 1,000 tokens against the length of the output, one dot per
+problem (R1 only: Qwen almost never uses these words, see the line printed below the plot).
 """)
 
 code(r"""
-rng = np.random.default_rng(0)
 hes = []
 for pid in problems.index:
     for model in [R1, QWEN]:
         text = outputs.loc[pid, model]
-        hes.append(dict(model=model, id=pid, outcome=outcomes.loc[pid, model],
+        hes.append(dict(model=model, id=pid, outcome=outcomes.loc[pid, model], n_tokens=tokens.loc[pid, model],
+                        count=len(HESITATION.findall(text)),
                         per_1k=len(HESITATION.findall(text)) / tokens.loc[pid, model] * 1000))
 hes = pd.DataFrame(hes)
+h1 = hes[hes.model == R1].set_index("id")
+rho_all = h1.n_tokens.rank().corr(h1.per_1k.rank())                      # Spearman rank correlation
+h_ok = h1[h1.outcome == "correct"]
+rho_ok = h_ok.n_tokens.rank().corr(h_ok.per_1k.rank())
 
-fig, ax = plt.subplots(figsize=(13, 3.8))
-ylabels = []
-for k, (model, o) in enumerate([(m, o) for m in [R1, QWEN] for o in OUTCOME_ORDER]):
-    d = hes[(hes.model == model) & (hes.outcome == o)]
-    ylabels.append(f"{model} · {SYMBOLS[o]} {o} ({len(d)})")
-    if len(d):
-        ax.scatter(d.per_1k, k + rng.uniform(-0.18, 0.18, len(d)), s=42, color=COLORS[o], ec="white", lw=0.8, zorder=3)
-        ax.plot([d.per_1k.median()] * 2, [k - 0.32, k + 0.32], color=INK, lw=2, zorder=4)
-ax.axhline(2.5, color=GRID, lw=1)
-ax.set_yticks(range(len(ylabels)), ylabels, color=INK)
-ax.set_ylim(len(ylabels) - 0.5, -0.5)
-ax.set_xlabel("hesitation words per 1,000 tokens   (black line = median)")
-ax.grid(axis="x", color=GRID, lw=0.6)
+MARKERS = {"correct": "o", "wrong": "X", "cut off": "s"}
+fig, ax = plt.subplots(figsize=(13, 5.2))
+for o in OUTCOME_ORDER:
+    d = h1[h1.outcome == o]
+    ax.scatter(d.n_tokens, d.per_1k, s=70 if o != "correct" else 46, marker=MARKERS[o], color=COLORS[o], ec="white",
+               lw=0.9, zorder=3 if o == "correct" else 4, label=f"{SYMBOLS[o]} {o} ({len(d)})")
+    if o != "correct":   # name the failures (problems at the same spot share one label)
+        for (x, y), ids in d.groupby(["n_tokens", d.per_1k.round(1)]).groups.items():
+            ax.annotate(" ".join(f"#{i}" for i in ids), (x, y), textcoords="offset points", xytext=(0, 9), ha="center",
+                        fontsize=8.5, color=INK)
+ax.set_xscale("log")
+ax.set_xticks([500, 1000, 2000, 4000, 8192], ["500", "1,000", "2,000", "4,000", "8,192\n(limit)"])
+ax.minorticks_off()
+ax.set_xlim(450, 9500)
+ax.set_ylim(0, None)
+ax.set_xlabel("length of R1's output (tokens, log scale)")
+ax.set_ylabel("hesitation words per 1,000 tokens")
+ax.grid(color=GRID, lw=0.6)
 ax.set_axisbelow(True)
-ax.tick_params(axis="y", length=0)
-ax.spines["left"].set_visible(False)
-med = hes[hes.model == R1].groupby("outcome").per_1k.median()
-ax.set_title(f"R1 hesitates more when it fails ({med['cut off']:.1f} and {med['wrong']:.1f} vs {med['correct']:.1f} per 1k tokens); "
-             "Qwen almost never hesitates", loc="left", fontsize=12, color=INK)
+ax.legend(loc="upper left", frameon=False)
+ax.set_title(f"The longer R1 thinks, the more it hesitates (rank correlation {rho_all:.2f}); "
+             "its failures are simply among the long ones", loc="left", fontsize=12, color=INK)
 plt.tight_layout()
 plt.show()
+
+q = hes[hes.model == QWEN]
+print(f"Rank correlation length vs hesitation rate, R1: all 50 problems {rho_all:.2f}, correct answers only {rho_ok:.2f}")
+print(f"Qwen: hesitation words in {(q['count'] > 0).sum()} of {len(q)} outputs ({q['count'].sum()} words in total; "
+      f"R1: {h1['count'].sum()})")
+h1.groupby("outcome").per_1k.agg(["count", "median"]).round(1)
 """)
 
 md(r"""
@@ -662,7 +864,10 @@ md(r"""
   re-checking, re-deriving, and repeating the same result several times.
 * When R1 fails, the correct result sometimes *does* appear (#12, #8), but R1 does not settle on it; the value lanes
   show it **switching between a few candidates** instead of converging.
-* Doubt is not a sign of good reasoning here: R1 hesitates **more** on the problems it gets wrong.
+* **Doubt grows with length, and does not single out the failures.** R1 hesitates more per 1,000 tokens the longer it
+  thinks, also among the correct answers. Its failures have a high rate (median 7.0 wrong, 8.8 cut off, against 5.2
+  correct), but they are 7 problems and all of them are long, so **this run cannot separate "fails" from "thinks long"**.
+  What can be said: more doubt does not go together with better answers.
 
 This is descriptive, so it cannot tell us if the "checking" part is useful. Experiment A tests that directly.
 """)
@@ -670,15 +875,22 @@ This is descriptive, so it cannot tell us if the "checking" part is useful. Expe
 # ----------------------------------------------------------------------------------------------------------------
 md(r"""
 ## 5. Experiment A: early answering, how much of the thinking does R1 need?
-We take R1's saved thinking for each of the 50 problems, **cut it off** after 0%, 10%, 25%, 50%, 75% or 100% of its
-tokens, close the thinking and **force an answer** right away:
+We take R1's saved thinking for each of the 50 problems, **cut it off** after 0%, 5%, 10%, … 100% of its tokens
+(21 cut points), close the thinking and **force an answer** right away:
 
-`<question> <first x% of the thinking> </think> The final answer is \boxed{` → the model completes the number (greedy).
+`<question> <first x% of the thinking> </think> The final answer is \boxed{` → the model completes the number.
+
+At every cut point we record three things:
+1. the **forced answer** (greedy: always the most likely next token), and if it is correct;
+2. the **probability of the correct answer**: how likely the model is to write exactly the correct number here
+   (its digits, with or without a thousands comma, followed by something that is not another digit);
+3. a **layer read-out** for section 5.3: how likely the first digit of the correct answer is when we read the model's
+   state after each of its 28 layers.
 
 If the forced answer is already correct at 50%, the second half of the thinking was not needed for *this* answer.
 (Method after Lanham et al., 2023, *Measuring Faithfulness in Chain-of-Thought Reasoning*.)
 
-Results are saved to `nb03_early_answering.jsonl` in the run folder; if the file is complete, nothing is re-run.
+Results are saved to `nb03_early_answering_fine.jsonl` in the run folder; if the file is complete, nothing is re-run.
 """)
 
 code(r"""
@@ -753,9 +965,10 @@ def is_correct(answer, gold):
 """)
 
 code(r"""
-FRACTIONS = [0, 0.1, 0.25, 0.5, 0.75, 1.0]
-EARLY_PATH = RESULTS_DIR / "nb03_early_answering.jsonl"
+FRACTIONS = [round(i / 20, 2) for i in range(21)]     # 0%, 5%, ..., 100% of the thinking
+EARLY_PATH = RESULTS_DIR / "nb03_early_answering_fine.jsonl"
 RUN_EARLY_ANSWERING = True     # set to False to never start the model (only load saved results)
+FORCE = "\n</think>\n\nThe final answer is \\boxed{"
 
 done = {(r["id"], r["fraction"]) for r in load_jsonl(EARLY_PATH)}
 todo = [pid for pid in problems.index if any((int(pid), f) not in done for f in FRACTIONS)]
@@ -763,31 +976,90 @@ print(f"Early answering: {len(problems) - len(todo)}/{len(problems)} problems do
 
 if todo and RUN_EARLY_ANSWERING and DEVICE:
     model, tok = load_model(R1_NAME)
-    suffix = tok("\n</think>\n\nThe final answer is \\boxed{", add_special_tokens=False).input_ids
-    for n, pid in enumerate(todo):
-        prompt = tok(build_prompt(tok, problems.loc[pid, "question"], True), add_special_tokens=False).input_ids
-        think = tok(thinking(outputs.loc[pid, R1]), add_special_tokens=False).input_ids
-        rows = []
-        for f in FRACTIONS:
-            if (int(pid), f) in done:
-                continue
-            kept = think[:round(f * len(think))]
-            ids = torch.tensor([prompt + kept + suffix], device=DEVICE)
-            with torch.no_grad():
-                out = model.generate(ids, attention_mask=torch.ones_like(ids), max_new_tokens=16, do_sample=False,
-                                     temperature=None, top_p=None, top_k=None, pad_token_id=tok.pad_token_id)
-            completion = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
-            answer = completion.split("}")[0].strip()
-            rows.append(dict(id=int(pid), fraction=f, kept_tokens=len(kept), think_tokens=len(think),
-                             completion=completion, answer=answer, correct=is_correct(answer, problems.loc[pid, "gold"])))
-        append_jsonl(EARLY_PATH, rows)
-        print(f"  {n + 1}/{len(todo)}  #{pid}: " + " ".join("✓" if r["correct"] else "✗" for r in rows))
+    force = tok(FORCE, add_special_tokens=False).input_ids
+    vocab = [tok.decode([i]) for i in range(len(tok))]
+    more_digits = torch.zeros(model.config.vocab_size, dtype=torch.bool)    # tokens that would continue a number
+    more_digits[:len(vocab)] = torch.tensor([bool(re.match(r"[0-9,]", v)) for v in vocab])
+    more_digits = more_digits.to(DEVICE)
+
+    def read(ids, cache, all_layers=False):
+        # Run the model on the new tokens only. `cache` holds everything it has read before, so each long thinking
+        # is read once and re-used for all cut points (instead of 21 times).
+        out = model.model(torch.tensor([ids], device=DEVICE), past_key_values=cache, use_cache=True,
+                          output_hidden_states=all_layers)
+        return out, out.past_key_values
+
+    def log_probs(hidden):
+        return torch.log_softmax(model.lm_head(hidden).float(), dim=-1)
+
+    with torch.no_grad():
+        for n, pid in enumerate(todo):
+            gold = problems.loc[pid, "gold"]
+            forms = [gold] + ([f"{int(gold):,}"] if gold.isdigit() and int(gold) >= 1000 else [])   # 70000 or 70,000
+            first_digit = tok(gold, add_special_tokens=False).input_ids[0]
+            prompt = tok(build_prompt(tok, problems.loc[pid, "question"], True), add_special_tokens=False).input_ids
+            think = tok(thinking(outputs.loc[pid, R1]), add_special_tokens=False).input_ids
+            _, cache = read(prompt, None)
+            fed, rows = 0, []
+            for f in FRACTIONS:
+                kept = round(f * len(think))
+                if kept > fed:                                   # read the next piece of the thinking
+                    _, cache = read(think[fed:kept], cache)
+                    fed = kept
+                if (int(pid), f) in done:
+                    continue
+                out, cache = read(force, cache, all_layers=True)
+                first = log_probs(out.last_hidden_state[0, -1])   # what the model would write first, after "\boxed{"
+
+                # (3) layer read-out: turn the state after every layer into next-token probabilities ("logit lens")
+                states = torch.stack([h[0, -1] for h in out.hidden_states[:-1]])
+                per_layer = torch.softmax(model.lm_head(model.model.norm(states)).float(), dim=-1)[:, first_digit]
+                layer_p = [round(p, 4) for p in per_layer.tolist()] + [round(first[first_digit].exp().item(), 4)]
+
+                # (2) probability of the correct answer: feed its digits and multiply their probabilities
+                p_correct = 0.0
+                for form in forms:
+                    digits = tok(form, add_special_tokens=False).input_ids
+                    o, cache = read(digits, cache)
+                    lp = log_probs(o.last_hidden_state[0])
+                    logp = first[digits[0]].item() + sum(lp[j - 1, t].item() for j, t in enumerate(digits) if j > 0)
+                    p_ends = 1 - lp[-1].exp()[more_digits].sum().item()      # ... and the number ends here
+                    p_correct += math.exp(logp) * p_ends
+                    cache.crop(-len(digits))                                 # forget the digits again
+
+                # (1) greedy forced answer: write tokens until the closing brace
+                written, nxt, n_fed = [], int(first.argmax()), 0
+                for _ in range(12):
+                    written.append(nxt)
+                    if "}" in tok.decode(written):
+                        break
+                    o, cache = read([nxt], cache)
+                    n_fed += 1
+                    nxt = int(model.lm_head(o.last_hidden_state[0, -1]).argmax())
+                cache.crop(-(len(force) + n_fed))                            # back to "prompt + thinking so far"
+                answer = tok.decode(written).split("}")[0].strip()
+                rows.append(dict(id=int(pid), fraction=f, kept_tokens=kept, think_tokens=len(think), answer=answer,
+                                 correct=is_correct(answer, gold), kept_chars=len(tok.decode(think[:kept])),
+                                 p_correct=round(p_correct, 4), layer_p=layer_p))
+            append_jsonl(EARLY_PATH, rows)
+            del cache
+            free_memory()
+            print(f"  {n + 1}/{len(todo)}  #{pid}: " + "".join("✓" if r["correct"] else "✗" for r in rows))
     del model, tok
     free_memory()
 
 early = pd.DataFrame(load_jsonl(EARLY_PATH))
 if len(early):
-    display(early.groupby("fraction").correct.agg(accuracy="mean", correct="sum", problems="count"))
+    display(early[early.fraction.isin([0, 0.25, 0.5, 0.75, 1])].groupby("fraction")
+            .agg(correct=("correct", "sum"), problems=("correct", "count"), accuracy=("correct", "mean"),
+                 mean_probability=("p_correct", "mean")).round(2))
+""")
+
+md(r"""
+### 5.1 Accuracy and confidence along the thinking
+**Left:** the share of the 50 problems with a correct forced answer, at each cut point.
+**Right:** one row per problem; the colour is the **probability of the correct answer** at each cut point (white = 0%,
+dark blue = 100%). The ring marks where the correct result is first written in the thinking (section 4.1).
 """)
 
 code(r"""
@@ -795,31 +1067,34 @@ if len(early) == 0:
     print("No early-answering results yet: run the cell above on a GPU.")
 else:
     piv = early.pivot(index="id", columns="fraction", values="correct").astype(bool)
+    prob = early.pivot(index="id", columns="fraction", values="p_correct")
 
     def locks_in(row):
-        # first fraction from which the forced answer stays correct (2 = never)
+        # first cut point from which the forced answer stays correct until the end (NaN = never)
         for f in FRACTIONS:
             if row.loc[f:].all():
                 return f
-        return 2.0
+        return np.nan
 
     lock = piv.apply(locks_in, axis=1)
-    order_e = sorted(piv.index, key=lambda i: (OUTCOME_ORDER.index(outcomes.loc[i, R1]), lock[i], i))
-    edges = [0] + [(a + b) / 2 for a, b in zip(FRACTIONS, FRACTIONS[1:])] + [1.0]
+    order_e = sorted(piv.index, key=lambda i: (OUTCOME_ORDER.index(outcomes.loc[i, R1]),
+                                               2 if np.isnan(lock[i]) else lock[i], i))
+    PROB_CMAP = plt.matplotlib.colors.LinearSegmentedColormap.from_list("prob", ["#ffffff", BLUE_LIGHT, BLUE, "#123a6b"])
 
     fig = plt.figure(figsize=(13, 10.5))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1.25], wspace=0.25)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1.3], wspace=0.22)
 
     # Left: accuracy curve
     ax = fig.add_subplot(gs[0])
     acc = piv.mean()
-    ax.plot(FRACTIONS, acc.values, color=BLUE, lw=2, marker="o", ms=8, mec="white", mew=1.5, zorder=3)
-    for f, a in acc.items():
-        ax.annotate(f"{a:.0%}", (f, a), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=10, color=INK)
+    ax.plot(FRACTIONS, acc.values, color=BLUE, lw=2, marker="o", ms=5.5, mec="white", mew=1, zorder=3)
+    for f in [0, 0.25, 0.5, 0.75, 1.0]:
+        ax.annotate(f"{acc[f]:.0%}", (f, acc[f]), textcoords="offset points", xytext=(0, 9), ha="center", fontsize=10,
+                    color=INK)
     full = (outcomes[R1] == "correct").mean()
     ax.axhline(full, color=INK_MUTED, ls="--", lw=1)
     ax.text(0.02, full + 0.015, f"R1 answering normally: {full:.0%}", fontsize=9, color=INK_MUTED)
-    ax.set_xticks(FRACTIONS, [f"{f:.0%}" for f in FRACTIONS])
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0%", "25%", "50%", "75%", "100%"])
     ax.set_xlim(-0.04, 1.04)
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
@@ -829,51 +1104,196 @@ else:
     ax.set_axisbelow(True)
     ax.set_title("Accuracy when the thinking is cut early", loc="left", fontsize=11.5, color=INK)
 
-    # Right: per problem
+    # Right: probability of the correct answer, per problem
     ax = fig.add_subplot(gs[1])
+    step = FRACTIONS[1] - FRACTIONS[0]
+    im = ax.imshow(prob.loc[order_e, FRACTIONS].values, cmap=PROB_CMAP, vmin=0, vmax=1, aspect="auto",
+                   extent=(-step / 2, 1 + step / 2, len(order_e), 0), interpolation="nearest")
+    for yy in range(1, len(order_e)):
+        ax.axhline(yy, color=SURFACE, lw=1.2)
     for yy, pid in enumerate(order_e):
-        for k, f in enumerate(FRACTIONS):
-            c = COLORS["correct"] if piv.loc[pid, f] else COLORS["wrong"]
-            ax.add_patch(plt.Rectangle((edges[k] + 0.004, yy + 0.08), edges[k + 1] - edges[k] - 0.008, 0.84, color=c))
-        g = r1_think.loc[pid, "gold_first"] / r1_think.loc[pid, "think_tokens"]
+        g = r1_think.loc[pid, "gold_first"] / r1_think.loc[pid, "think_tokens"]     # share of the characters
         if not np.isnan(g) and not r1_think.loc[pid, "gold_in_question"]:
-            ax.plot(g, yy + 0.5, marker="o", ms=5.5, color="white", mec=INK, mew=1.2, zorder=3)
+            # the cut points are shares of the tokens: convert with the number of characters kept at each cut point
+            kept_chars = early[early.id == pid].set_index("fraction").kept_chars.loc[FRACTIONS].values
+            g = np.interp(g * kept_chars[-1], kept_chars, FRACTIONS)
+            ax.plot(g, yy + 0.5, marker="o", ms=6, color="none", mec="#eb6834", mew=1.8, zorder=3)
     bounds = np.cumsum([0] + [int((outcomes.loc[order_e, R1] == o).sum()) for o in OUTCOME_ORDER])
     for o, a, b in zip(OUTCOME_ORDER, bounds, bounds[1:]):
         if b > a:
-            ax.text(1.02, (a + b) / 2, f"{SYMBOLS[o]} {o}\nin the full run", va="center", fontsize=9.5, color=INK)
-            ax.axhline(b, color=INK, lw=1)
-    ax.set_xlim(0, 1)
+            ax.text(1.05, (a + b) / 2, f"{SYMBOLS[o]} {o}\nin the full run", va="center", fontsize=9.5, color=INK)
+            if b < len(order_e):
+                ax.axhline(b, color=INK, lw=1.2)
+    ax.set_xlim(-step / 2, 1 + step / 2)
     ax.set_ylim(len(order_e), 0)
-    ax.set_xticks(FRACTIONS, [f"{f:.0%}" for f in FRACTIONS])
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0%", "25%", "50%", "75%", "100%"])
     ax.set_yticks(np.arange(len(order_e)) + 0.5, [f"#{i}" for i in order_e], fontsize=7)
     ax.tick_params(length=0)
     for s in ax.spines.values():
         s.set_visible(False)
     ax.set_xlabel("share of the thinking kept")
-    ax.legend(handles=[Patch(color=COLORS["correct"], label="✓ forced answer correct"),
-                       Patch(color=COLORS["wrong"], label="✗ forced answer wrong"),
-                       Line2D([], [], marker="o", ls="", color="white", mec=INK, ms=6, label="correct result first stated (section 4)")],
-              loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=2, frameon=False, fontsize=9)
-    ax.set_title("Per problem", loc="left", fontsize=11.5, color=INK)
+    cb = fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.025, pad=0.06, aspect=40)
+    cb.set_ticks([0, 0.5, 1], labels=["0%", "50%", "100%"])
+    cb.set_label("probability of the correct answer", fontsize=9, color=INK_MUTED)
+    cb.outline.set_visible(False)
+    ax.legend(handles=[Line2D([], [], marker="o", ls="", color="none", mec="#eb6834", mew=1.8, ms=7,
+                              label="correct result first written in the thinking (section 4.1)")],
+              loc="lower left", bbox_to_anchor=(0, 1.0), frameon=False, fontsize=9, handletextpad=0.2, borderpad=0)
+    ax.set_title("Per problem: how sure is R1 of the correct answer?", loc="left", fontsize=11.5, color=INK, pad=22)
 
-    fig.suptitle(f"Early answering: with half of its thinking R1 is already right {acc[0.5]:.0%} of the time "
+    half = acc[0.5]
+    fig.suptitle(f"Early answering: with half of its thinking R1 is already right {half:.0%} of the time "
                  f"(no thinking: {acc[0]:.0%})", x=0.01, ha="left", fontsize=12.5, color=INK)
+    plt.show()
+
+    sure = early.p_correct
+    print(f"The probability is rarely in between: {((sure < 0.1) | (sure > 0.9)).mean():.0%} of the {len(early)} "
+          f"measurements are below 10% or above 90%.")
+    unsure = early[early.correct & (early.p_correct < 0.5)]
+    print(f"Correct forced answers with a probability under 50% (correct, but not sure): {len(unsure)}, "
+          f"of which {int((unsure.fraction <= 0.25).sum())} in the first quarter of the thinking. "
+          f"Wrong forced answers with a probability of 50% or more: {int((~early.correct & (early.p_correct >= 0.5)).sum())}.")
+    print(f"Forced answer correct from some point until the end: {lock.notna().sum()} of {len(lock)} problems.")
+""")
+
+md(r"""
+### 5.2 Does R1 need to write the result before it can answer?
+For each problem we compare two cut points:
+* **locked in**: the first cut point from which the forced answer is correct and stays correct;
+* **written**: the first cut point at which the correct number appears **anywhere** in the text R1 was shown.
+
+If R1 only repeats what it has written, it locks in at the cut point where the number is written, or later.
+(Left out: the 4 problems where the correct number is already in the question, and the problems that never lock in.)
+""")
+
+code(r"""
+def contains_number(text, value):
+    return re.search(r"(?<![\d.])" + re.escape(value) + r"(?![\d]|\.\d)", text.replace(",", "")) is not None
+
+
+if len(early):
+    chars = early.pivot(index="id", columns="fraction", values="kept_chars")
+    rows = []
+    for pid in problems.index:
+        if r1_think.loc[pid, "gold_in_question"] or np.isnan(lock[pid]):
+            continue
+        think, gold = thinking(outputs.loc[pid, R1]), problems.loc[pid, "gold"]
+        shown = {f: think[:chars.loc[pid, f]] for f in FRACTIONS}          # the text R1 was shown at each cut point
+        written = next((f for f in FRACTIONS if contains_number(shown[f], gold)), np.nan)
+        rows.append(dict(id=pid, outcome=outcomes.loc[pid, R1], locked=lock[pid], written=written,
+                         p_at_lock=prob.loc[pid, lock[pid]], text_end="…" + shown[lock[pid]][-110:].replace("\n", " ")))
+    ahead = pd.DataFrame(rows).set_index("id").dropna(subset=["written"])
+    ahead["delay"] = (ahead.locked - ahead.written).round(2)                # < 0: locked in before it is written
+    n_before, n_same, n_later = (ahead.delay < 0).sum(), (ahead.delay == 0).sum(), (ahead.delay > 0).sum()
+    no_thinking = int((ahead.locked == 0).sum())
+
+    step = FRACTIONS[1] - FRACTIONS[0]
+    counts = ahead.delay.value_counts().sort_index()
+    fig, ax = plt.subplots(figsize=(13, 4.6))
+    GROUPS = [("locked in before the number is written", BLUE, counts[counts.index < 0]),
+              ("at the cut point where it is first written", "#123a6b", counts[counts.index == 0]),
+              ("only later", COLORS["cut off"], counts[counts.index > 0])]
+    for label, color, part in GROUPS:
+        ax.bar(part.index, part.values, width=step * 0.86, color=color, label=f"{label} ({int(part.sum())})")
+        for x, v in part.items():
+            ax.text(x, v + 0.15, str(v), ha="center", fontsize=9, color=INK)
+    ax.axvline(-step / 2, color=INK_MUTED, lw=1, ls="--")
+    ax.set_xticks(np.arange(-0.5, 0.41, 0.1))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: "0" if abs(v) < 1e-9 else f"{v:+.0%}"))
+    ax.set_xlabel("cut point where the answer locks in  minus  cut point where the number is first written  "
+                  "(share of the thinking)")
+    ax.set_ylabel("problems")
+    ax.set_ylim(0, counts.max() + 1.5)
+    ax.grid(axis="y", color=GRID, lw=0.6)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper right", frameon=False)
+    ax.set_title(f"R1 is ahead of its own text: in {n_before} of {len(ahead)} problems it gives the correct answer "
+                 "before the number is written", loc="left", fontsize=12.5, color=INK)
+    plt.tight_layout()
+    plt.show()
+
+    print(f"{len(ahead)} problems: locked in before the number is written {n_before} (of these {no_thinking} with no "
+          f"thinking at all), at the same cut point {n_same}, later {n_later}. "
+          f"Median: {-ahead.delay.median():.0%} of the thinking before it is written.")
+    # The end of the text R1 had been shown when its answer locked in (the correct number is not in it yet)
+    EXAMPLES = [0, 10, 11, 24]
+    pd.set_option("display.max_colwidth", 130)
+    display(ahead.loc[EXAMPLES, ["locked", "written", "text_end"]].assign(correct_answer=problems.loc[EXAMPLES, "gold"]))
+""")
+
+md(r"""
+### 5.3 A look inside: in which layer does the answer appear?
+R1 has 28 layers. Normally only the output of the last layer is turned into the next token. Here we read out the model's
+state **after every layer** in the same way (a "logit lens") at the position right after `\boxed{`, and ask: how likely
+is the **first digit of the correct answer**? The plot shows the average over the problems that R1 answers correctly with
+its full thinking.
+
+*Read it with care: only the first digit is checked, and the early layers are not made to be read out like this, so a
+low value there means "not readable this way", not "not there".*
+""")
+
+code(r"""
+if len(early):
+    solved = early[(early.fraction == 1.0) & early.correct].id
+    lens = early[early.id.isin(solved)]
+    grid = np.array([np.mean(np.stack(lens[lens.fraction == f].layer_p.to_list()), axis=0) for f in FRACTIONS]).T
+    n_layers = grid.shape[0] - 1                                   # row 0 = input embeddings, rows 1..28 = layers
+    readable = int(np.argmax(grid[:, -1] >= 0.5))                  # first layer with 50% at the full thinking
+    quiet = int(np.max(np.nonzero(grid.max(axis=1) < 0.01)[0]))    # up to this layer: below 1% at every cut point
+    FIRST_SHOWN = 17
+    step = FRACTIONS[1] - FRACTIONS[0]
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    im = ax.imshow(grid[FIRST_SHOWN:], cmap=PROB_CMAP, vmin=0, vmax=1, aspect="auto", origin="lower",
+                   extent=(-step / 2, 1 + step / 2, FIRST_SHOWN - 0.5, n_layers + 0.5), interpolation="nearest")
+    for yy in range(FIRST_SHOWN, n_layers):
+        ax.axhline(yy + 0.5, color=SURFACE, lw=1.2)
+    ax.axhline(readable - 0.5, color=INK, lw=1, ls="--")
+    ax.text(0.0, readable - 0.62, f"from layer {readable} on, the first digit of the answer can be read out",
+            fontsize=9.5, color=INK, va="top")
+    ax.text(0.0, FIRST_SHOWN + 0.3, f"layers 1 to {quiet}: below 1% at every cut point (layers 1 to {FIRST_SHOWN - 1} are not shown)",
+            fontsize=9.5, color=INK_MUTED, va="center")
+    ax.set_yticks(range(FIRST_SHOWN, n_layers + 1))
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ["0%", "25%", "50%", "75%", "100%"])
+    ax.set_xlabel("share of the thinking kept")
+    ax.set_ylabel(f"layer ({n_layers} = last)")
+    ax.tick_params(length=0)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    cb = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cb.set_ticks([0, 0.5, 1], labels=["0%", "50%", "100%"])
+    cb.set_label("probability of the first digit of the correct answer", fontsize=9, color=INK_MUTED)
+    cb.outline.set_visible(False)
+    ax.set_title(f"The answer becomes readable only in the last {n_layers - readable + 1} of {n_layers} layers, "
+                 f"however much thinking is kept (average over {len(solved)} problems)", loc="left", fontsize=12.5,
+                 color=INK)
+    plt.tight_layout()
     plt.show()
 """)
 
 md(r"""
 **Takeaways (section 5)**
-* **The thinking does real work.** Forced to answer with no thinking at all, R1 is right on only 6 of 50 problems (12%).
-  It cannot solve these problems "in its head".
-* **R1 needs about three quarters of its thinking.** Accuracy climbs steeply from 25% to 75% of the thinking
-  (36% → 74% → 90%); **the last quarter adds nothing** (90% → 90%). That last part is checking that does not change the answer.
-* **The visible reasoning matches the answer.** In the per-problem plot, the forced answer turns correct (red → green)
-  around the point where the correct result first appears in the text (white dots, section 4). What R1 writes is what it
-  then answers, so here the chain of thought is a faithful record, not decoration.
-* **R1 sometimes knows the answer and does not stop.** With its full thinking, the forced answer is right on 45 problems,
-  2 more than in the normal run: in #8 R1 had the correct 45 after 75% of its thinking, but kept going and was cut off.
-  (#4 is correct even with no thinking because its answer, 20, is the number of chickens in the question: a lucky guess.)
+* **The thinking does real work.** Forced to answer with no thinking at all, R1 is right on only 6 of 50 problems (12%),
+  and on 3 of these 6 its probability for the correct answer is below 50%. It cannot solve these problems "in its head".
+* **R1 needs about three quarters of its thinking.** Accuracy rises step by step from 12% to 90% at three quarters of the
+  thinking (36% at one quarter, 74% at half). **The last quarter changes no answer**: from 75% on, the same 45 problems
+  are correct at every cut point.
+* **R1 does not become sure slowly, it flips.** In 90% of the 1,050 measurements the probability of the correct answer
+  is below 10% or above 90%. In the per-problem plot each row turns from white to dark blue within one or two cut points
+  and then stays dark (45 of 50 problems lock in).
+* **R1 is ahead of its own text.** In 26 of 41 problems the answer locks in **before the correct number is written
+  anywhere** in the text R1 was shown (3 of them need no thinking at all), in 9 at the cut point where it is written,
+  and in only 6 later. The table shows what happens: once the intermediate results are on the page, R1 does the
+  remaining step "in its head". So the thinking is needed to get there, but writing down the final result is not, and
+  what comes after it (60% of the thinking, section 4) is checking that does not change the answer.
+* **R1 sometimes knows the answer and does not stop.** With its full thinking the forced answer is right on 45 problems,
+  2 more than in the normal run: in #8 R1 is sure of the correct 45 from 55% of its thinking on, but kept going and was
+  cut off. (#4 is correct almost from the start because its answer, 20, is the number of chickens in the question.)
+* **Inside the model, the answer appears late.** The first digit of the answer can be read out only in the last 5 of
+  the 28 layers. More thinking does not make it appear in an earlier layer, it only makes it more certain.
+
+*These runs were made on an Apple M3 GPU (MPS). The forced answers are greedy, so the six cut points of an earlier,
+coarser run (0, 10, 25, 50, 75, 100%) were reproduced exactly (300 of 300 answers).*
 """)
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1011,9 +1431,10 @@ else:
     ax.set_xlim(-0.75, 4.05)
     ax.set_ylim(len(pids), -0.9)
     ax.axis("off")
-    acc = reword.groupby(["model", "wording"]).correct.mean()
-    ax.set_title(f"Rewording: R1 {acc[(R1, 'original')]:.0%} → {acc[(R1, 'reworded')]:.0%} correct, "
-                 f"Qwen {acc[(QWEN, 'original')]:.0%} → {acc[(QWEN, 'reworded')]:.0%} correct",
+    hits = reword.groupby(["model", "wording"]).correct.agg(["sum", "count"])
+    frac = lambda m, w: f"{hits.loc[(m, w), 'sum']} of {hits.loc[(m, w), 'count']}"
+    ax.set_title(f"Rewording: R1 correct in {frac(R1, 'original')} runs → {frac(R1, 'reworded')}; "
+                 f"Qwen in {frac(QWEN, 'original')} → {frac(QWEN, 'reworded')}",
                  loc="left", fontsize=12.5, color=INK, pad=12)
     ax.legend(handles=[Patch(color=COLORS[o], label=f"{SYMBOLS[o]} {o}") for o in ["correct", "wrong", "cut off"]],
               loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=3, frameon=False)
@@ -1041,20 +1462,24 @@ md(r"""
 ## 7. Summary
 **Can a small reasoning model solve grade-school math?** Mostly (43 of 50), and here is what the reasoning changes:
 
-1. **The failures are nested.** R1-Distill solves every problem its base model Qwen2.5-Math solves, plus 3 more (section 1).
+1. **The failures are nested.** R1-Distill solves every problem its base model Qwen2.5-Math solves, plus 3 more
+   (section 1). On 50 problems this difference is not statistically secured (p = 0.25), so what follows is about *how*
+   the models differ.
 2. **Reasoning fixes *carrying out*, not *understanding*.** R1's 3 extra wins are exactly Qwen's 3 made-up code outputs:
    R1 does the arithmetic in text instead of pretending to run code (sections 2–3). When the question is misread,
-   both models misread it the same way: R1 inherited these errors from Qwen.
+   both models misread it the same way, which fits R1 keeping these errors from its base model.
 3. **Many "hard" problems are hard because of their wording.** Clearer versions of the misread or ambiguous questions
-   fix 4 of 5 for Qwen and raise R1 from 50% to 85% (section 6).
-4. **The thinking does real work, but too much of it.** Without thinking R1 gets 12% right, with 75% of it 90%, and the
-   last quarter adds nothing (section 5). The correct result first appears after ~40% of the thinking, and R1 then keeps
-   re-computing the same values (section 4). On problems it cannot solve it doubts more, goes in circles and runs out of
-   tokens, sometimes after already having the answer (#8).
+   fix 4 of 5 for Qwen and raise R1 from 10 to 17 correct runs out of 20 (section 6).
+4. **The thinking does real work, but too much of it.** Without thinking R1 gets 12% right, with three quarters of it
+   90%, and the last quarter changes no answer (section 5). R1 is even ahead of its text: in 26 of 41 problems it can
+   give the correct answer before the number is written. After that it keeps re-computing the same values (section 4).
+5. **The two models get stuck differently.** Qwen falls into a loop and repeats the same sentences word for word; R1
+   goes in circles with new wording, doubts more the longer it thinks, and runs out of tokens, sometimes after already
+   having the answer (#8) (sections 2.1 and 4).
 
 **Limits:** 50 problems and one run per model; R1 samples, so single failures can be chance (section 6). The answer
-positions come from text matching (section 4), and the failure types and rewordings are judgements made with the AI
-that the team has checked.
+positions come from text matching (sections 4 and 5.2), the layer read-out only checks the first digit (section 5.3),
+and the failure types and rewordings are judgements made with the AI that the team has checked.
 """)
 
 nb = {"cells": cells,
