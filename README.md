@@ -20,7 +20,9 @@ Goal: Design a visualization that helps you observe patterns in what goes in and
 
 ## AI usage
 
-The AI-aided pair documents prompts, decisions and lessons learned in [`AI_USAGE_LOG.md`](AI_USAGE_LOG.md).
+The AI-aided pair documents its use of generative AI in two files:
+- [`AI_INTERACTION_RECORD_PHASE1.md`](AI_INTERACTION_RECORD_PHASE1.md): AI interaction record for Phase I (prompts, suggestions, what was accepted or changed and why)
+- [`GENAI_REFLECTION.md`](GENAI_REFLECTION.md): reflection on GenAI usage (failure patterns, best practices)
 
 
 ## To do / Brainstorm ideas
